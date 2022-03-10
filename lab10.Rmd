@@ -1,0 +1,207 @@
+---
+title: 'Lab 10: Webscraping'
+author: "Shuying Yu"
+date: "3/10/2022"
+output: html_document
+---
+
+```{r setup, include=TRUE, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE,message = FALSE,cache=TRUE)
+
+
+#Attach packages
+library(tidyverse)
+library(tidytext)
+library(purrr)
+
+#Workhorse for webscraping
+library(rvest)
+
+#Other packages
+library(cowplot)
+library(ggwordcloud)
+```
+
+
+Songlyrics.com of all stored information, with different song lyrics. Now we will learn how to extract information
+
+
+
+# Webscrape: quick and dirty
+
+```{r}
+#Tell R where to get lyrics
+#Copy and paste in URL
+panic_lyric <- read_html("http://www.songlyrics.com/panic!-at-the-disco/i-write-sins-not-tragedies-lyrics/") %>% 
+  
+  #From all HTML, get those information from nodes that we want
+  #Only lyrics section from CSS selector
+  html_nodes("#songLyricsDiv") %>% 
+  
+  #Convert HTML to R text
+  html_text()
+
+#Check text
+#head(panic_lyric)
+
+
+
+#Use stringr to manipulate text data
+panic_lyric <- panic_lyric %>% 
+  
+  #Get rid of line separators (\n) with a space
+  str_replace_all("\n", " ") %>% 
+  
+  #Get rid of punctuations using regex
+  str_remove_all(pattern = "[[:punct:]]") %>% 
+  
+  #Lowercase
+  str_to_lower() %>% 
+  
+  #Split string based on spaces that are added
+  str_split(" ") %>% 
+  
+  #Make it as dataframe
+  as.data.frame()
+
+
+#Rename column as `word`
+colnames(panic_lyric)[1] <- "word"
+
+#Remove stop words
+panic_clean <- panic_lyric %>% 
+  anti_join(stop_words, by = "word")
+```
+
+
+# Download other songs using `purrr`
+
+How their songs have changed over time. Everytime there is a new song, we can extract lyrics
+
+```{r}
+#Load data
+load(here::here("data", "panic_songs.Rdata"))
+
+#Get lyrics function to webscrpe to get the same format as Rdata
+get_lyrics <- function(song, artist, album, year) {
+  
+  
+  
+  
+  ########## Get everything into single URL ##########
+  
+  #Part of URL that never changes
+  base1 <- c("https://songlyrics.com/")
+  
+  #Always end with a -lyrics
+  base2 <- c("-lyrics")
+  
+  #Artist URL, take everything out except exclaimation point
+  #If see punctuation, replace with space
+  artist_url <- str_replace_all(artist, 
+                                pattern = "(?!\\!)[[:punct:]]",
+                                replacement = " ") %>% 
+    str_replace_all(pattern = " ", "-") %>% 
+    str_to_lower() %>% 
+    str_squish()
+  
+  
+  #Song URL, remove punctuations, based on observations on the URL
+  song_url <- str_remove_all(song,
+                             pattern = "(?!\\[!'])[[:punct:]]") %>% 
+    str_replace_all(pattern = "'", 
+                    replacement = " ") %>% 
+    str_replace_all(pattern = " ", "-") %>% 
+    str_to_lower() %>% 
+    str_squish()
+  
+    
+  #URL: paste everything together
+  url <- paste(base1, artist_url, "/", song_url, base2,
+               sep = "")
+  
+  
+  
+  ########## Using URL, extract everything we have ##########
+  
+  #Extract URL data as we did before
+  extract <- read_html(url) %>% 
+    #Everything same as we did before
+    html_nodes("#songLyricsDiv") %>% 
+    html_text() %>% 
+    str_replace_all("\n"," ") %>% 
+    str_remove_all(pattern = "[[:punct:]]") %>%   #Remove all the punctuation
+    str_to_lower() %>% 
+    str_split(" ") %>% 
+    as.data.frame() %>% 
+    
+    #Change column names
+    mutate(song = song,
+           artist = artist,
+           album = album,
+           year = year)
+  
+  #Clean column names
+  colnames(extract)[1] <- "word"
+  
+  #Remove stop words
+  extract_clean <- extract %>% 
+    anti_join(stop_words, by = "word")
+  
+  
+  #Return the data
+  return(extract_clean)
+
+}
+```
+
+
+Can play around with song lyrics for any song as long as you provide the song name, and artist name
+
+
+
+## If error, keep track of where it occurs
+
+Iterations can collapse with mistakes, but `purrr` allows you to keep going but helps keep track of errors
+
+```{r}
+#Make same function but safely
+safely_get_lyric <- safely(get_lyrics)
+
+#Run safe fx to get song lyrics and transpose it
+song_lyrics <- pmap(patd_df, safely_get_lyric) %>% 
+  transpose()
+
+#Check for any errors
+any_error <- compact(song_lyrics$error)
+
+## Two observations where it couldn't find URL, so know where you have the errors
+
+
+
+#But we still have so much data! Let's grab it from the list
+lyrics <- compact(song_lyrics$result) %>% 
+  
+  #Change to tibble
+  as_tibble_col(column_name = "word") %>% 
+  
+  #Unnest everything into proper tibble
+  unnest()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
