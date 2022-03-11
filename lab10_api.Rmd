@@ -1,0 +1,315 @@
+---
+title: 'Lab 10: API'
+author: "Shuying Yu"
+date: "3/10/2022"
+output: html_document
+---
+
+```{r setup, include=TRUE, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+#Attach packages in specific order
+
+library(sf) #work with shape file
+library(raster) #work with spatial data
+library(rnaturalearth) #website for spatial data or maps you can use for free
+library(tidyverse)
+library(jsonlite) #use API access
+library(here)
+```
+
+Temporary ICN key: 9bb4facb6d23f48efbf424bb05c0c1ef1cf6f468393bc745d42179ac4aca5fee
+
+Etiquette for API:
+
+- they will provide service to give data, maintained in R servers which can be expensive
+
+- make sure to put pause in loops (e.g., purrr), to prevent from crashing the server
+
+In console: usethis::edit_r_environ() and add key, need to restart R
+
+# Accessing IUCN API
+
+https://apiv3.iucnredlist.org/api/v3/docs
+
+- Under "species by Country", paste in data for that URL: "/api/v3/country/getspecies/:country?token='YOUR TOKEN'"
+
+- To get species, need to tell what country you want, TOKEN, etc
+
+```{r}
+#Get environ from system
+api_key <- Sys.getenv("IUCN_KEY")
+```
+
+
+# Get IUCN Redlist Version
+
+version endpoint: /api/v3/version
+
+```{r}
+domain_name <- "http://apiv3.iucnredlist.org"
+
+#Drop leading slash
+version_end <- "api/v3/version"
+
+#Stick together as URL
+#file.path like here, but takes character strings and put slashes in between
+version_url <- file.path(domain_name, version_end)
+
+
+
+#Copy and paste into browser to check version, but we can do it here
+#List of 1 element
+api_version <- jsonlite::fromJSON(version_url)
+
+api_version$version
+```
+
+
+
+# Count of how many species (spp) have been assessed
+
+/api/v3/speciescount?token='YOUR TOKEN'
+
+```{r}
+#Format string fpr sprintf function
+#Assembles formatted text
+count_stem <- "api/v3/speciescount?token=%s"
+
+#api_key is what goes into %s
+#Replaced with API token
+count_end <- sprintf(count_stem, api_key)
+
+#Assemble URL
+count_url <- file.path(domain_name, count_end)
+
+#Species count
+spp_count <- fromJSON(count_url)
+```
+
+
+All the mammals, reptiles, plants, but less for marine species
+
+
+# Get a page of results
+
+Species come in pages of 10k at a time, but can get loop for 1 set of 10k, then another set of 10k.
+
+/api/v3/species/page/:page_number?token='YOUR TOKEN'
+
+```{r}
+page_stem <- "api/v3/species/page/%s?token=%s"
+page_end <- page_stem %>% 
+  
+  #Number interpreted as a string
+  #Page 1, api key
+  sprintf(1, api_key)
+
+page_url <- file.path(domain_name, page_end)
+
+#Species from page 1
+spp_page1 <- fromJSON(page_url)
+
+#Species dataframe
+#also can do spp_page1[["result"]]
+spp_df <- spp_page1$result %>% 
+  
+  mutate(category = factor(category, 
+                           levels = c("LC", "NT", "VU", "EN", "CR", "EX"))) %>% 
+  
+  #NA obs will be dropped
+  filter(!is.na(category))
+
+
+
+#Plot
+ggplot(data = spp_df) +
+  geom_bar(aes(x = category, fill = category),
+           show.legend = FALSE) +
+  scale_fill_brewer(palette = "RdYlGn",
+                    
+                    #Opposite order so extinct is red
+                    direction = -1)
+```
+least concerned, not threatened, vulnerable, endangered, critically endangered, extinct
+
+# Get historical assessments by species name
+
+Time series to see if population getting better over time or not
+
+Not all species have multiple assessments. We'll look at leatherback sea turtles
+
+/api/v3/species/history/name/:name?token='YOUR TOKEN'
+
+```{r}
+hist_stem <- "api/v3/species/history/name/%s?token=%s"
+spp <- 'Dermochelys coriacea'
+hist_end <- sprintf(hist_stem, spp, api_key)
+
+spp_hist <- fromJSON(file.path(domain_name, hist_end))
+
+
+#Most of what we want in result
+spp_hist_df <- spp_hist$result
+```
+
+
+# Get threats
+
+Threats: `/api/v3/threats/species/name/:name?token='YOUR TOKEN'`
+Narratives: `/api/v3/species/narrative/:name?token='YOUR TOKEN'`
+
+
+```{r}
+threats_url <- file.path(domain_name, 
+                         sprintf('api/v3/threats/species/name/%s?token=%s', 
+                                 spp, api_key))
+
+#Check human threats to the leatherback seaturtile
+spp_thr <- fromJSON(threats_url)$result
+
+
+
+#Do same for narrative text by species name
+spp_narr <- file.path(domain_name, 
+                      sprintf('api/v3/species/narrative/%s?token=%s', 
+                              spp, api_key)) %>% 
+  fromJSON()
+
+
+#Explain reasoning behind categorization 
+spp_narr_df <- spp_narr$result
+
+#Look at threats
+spp_narr_df$threats
+```
+
+
+# Map pf species off coast of california
+
+Aquamaps
+
+## Read in the IUCN and AquaMaps data
+
+```{r}
+#read data
+iucn_spp_info <- read_csv(here("data/iucn_marine_spp_info_2021-3.csv"))
+#iucn_spp_info %>%  unique()
+
+cell_ids <- read_csv(here('data/am_latlong.csv'))
+spp_cells <- read_csv(here('data/am_spp_cells.csv'))
+spp_ids <- read_csv(here('data/am_spp_ids.csv'))
+```
+
+16k+ observatins which are species or sub-populations of species
+
+am_sid = aquamap species ID
+
+Now we want to join all the data together into a dataframe
+
+```{r}
+spp_risk_cells <- spp_cells %>%
+  
+  #Join spp_cells with cell_ids, based on loiczid column
+  #These are faster than merge, but if large, can use datatable package
+  #includes all rows in x and y
+  inner_join(cell_ids, by = 'loiczid') %>%
+  
+  #Join that with spp_ids, based on am_sid column
+  inner_join(spp_ids, by = 'am_sid') %>%
+  
+  #Join that with iunc_spp_info
+  #Link up columns names that don't match (binomial and sciname are same)
+  inner_join(iucn_spp_info, by = c('binomial' = 'sciname'))
+
+
+
+threatened_pct_cells <- spp_risk_cells %>%
+  
+  #Remove if risk less than 50%
+  filter(prob >= 0.5) %>%
+  
+  #Category column, look for vu, en, cr, ex
+  #Logical test, if in vector T/F, then threatened has T/F
+  mutate(threatened = (tolower(cat) %in% c('vu', 'en', 'cr', 'ex'))) %>%
+  
+  #Drop data deficient
+  filter(cat != 'dd') %>%
+  
+  #Group by lon and lat, this order for a reason
+  group_by(lon, lat) %>%
+  
+  #Summarize % threatened
+  summarize(pct_threatened = sum(threatened) / n(),
+            spp_richness = n())
+```
+
+
+
+## Convert cells into raster object
+
+If we wished to do spatial analysis with this lat-long map of percent threatened species, we can convert our grid to a raster.  Don't forget to tell it our CRS, which since we are using lat-long data, we can use WGS84, EPSG code 4326.
+
+Map out spatial distribution of species.
+
+```{r}
+#Convert to raster
+spp_risk_rast <- rasterFromXYZ(threatened_pct_cells)
+crs(spp_risk_rast) <- 4326
+
+plot(spp_risk_rast)
+```
+
+## Plot in ggplot
+
+Use natural earth to pull maps of North America
+
+```{r}
+#rnaturalearthdata to know scale
+
+#Scale = 10 if need map to be really detailed
+land_sf <- rnaturalearth::ne_countries(scale = 50, ### start with 110
+                                       country = c('united states of america', 'mexico'),
+                                       #Default in older sp R object file
+                                       returnclass = 'sf')
+
+#Check
+plot(land_sf %>% select(geometry))
+st_crs(land_sf)
+
+#Crop land to just region of interest
+land_sf_cropped <- land_sf %>%
+  st_crop(spp_risk_rast)
+
+
+#Now go back down to fix plot
+```
+
+
+Doesn't actual plot raster, but turns it back into a df
+
+```{r}
+spp_risk_rast_df <- spp_risk_rast %>%
+  
+  #Keeps lat long info as well rather than just values
+  as.data.frame(xy = TRUE)
+### Why does this have different length than threatened_pct_cells?
+
+
+#Plot of california coast
+ggplot(threatened_pct_cells) +
+  geom_raster(aes(x = lon, y = lat, fill = pct_threatened)) +
+  
+   #fill = spp_richness
+  
+  #ADD HERE
+  geom_sf(data = land_sf_cropped, fill = 'grey80', 
+          color = 'grey40', alpha = 1) +
+  scale_fill_viridis_c() +
+  coord_sf() +
+  theme_void()
+```
+
+
+Hot spot of endangeres species located in San Francisco Bay
+
